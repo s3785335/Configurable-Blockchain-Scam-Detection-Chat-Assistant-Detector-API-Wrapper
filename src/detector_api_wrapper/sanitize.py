@@ -7,8 +7,10 @@ sanitization is treated as a first-class requirement, not an afterthought.
 Rules implemented here (see draft, Section 3 - Security Considerations):
   - Reject early rather than trying to "clean" a malformed value.
   - Cap length and reject unexpected characters before deeper validation.
-  - Validate identifier format with a strict pattern (checksum/structural
-    validation should be added here if the real provider defines one).
+  - Validate identifier format with a strict, configurable pattern.
+    Provider-specific checksum/structural checks run afterwards through
+    the adapter's validate_resource_id() hook, because each client plugs
+    in a different API with its own identifier scheme.
   - Any option with a known set of valid values is checked against an
     explicit allow-list -- never passed through freely.
   - Never interpolate raw input into a URL or subprocess call; callers
@@ -16,12 +18,15 @@ Rules implemented here (see draft, Section 3 - Security Considerations):
 """
 
 import re
+from functools import lru_cache
 
 from .config import DEFAULT_CONFIG, WrapperConfig
 from .errors import InvalidInputError
 
-# Conservative allow-list pattern: alphanumeric, underscore, hyphen only.
-ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+@lru_cache(maxsize=8)
+def _compiled(pattern: str) -> re.Pattern:
+    return re.compile(pattern)
 
 
 def sanitize_resource_id(resource_id: str, config: WrapperConfig = DEFAULT_CONFIG) -> str:
@@ -35,15 +40,33 @@ def sanitize_resource_id(resource_id: str, config: WrapperConfig = DEFAULT_CONFI
             f"resource_id must be between 1 and {config.id_max_length} characters."
         )
 
-    if not ID_PATTERN.match(resource_id):
+    # fullmatch, so a trailing newline can't slip past a "$" anchor.
+    if not _compiled(config.id_pattern).fullmatch(resource_id):
         raise InvalidInputError("resource_id does not match the expected format.")
 
-    # TODO: if the real provider defines a checksum or structural rule
-    # (e.g. a check digit), apply it here -- this catches values that are
-    # technically valid-looking but still wrong. Left as a stub pending
-    # confirmation of the real provider's identifier scheme.
+    # Provider-specific checks (checksums, check digits, address formats)
+    # are applied by core.call_api via adapter.validate_resource_id() once
+    # the provider is known.
 
     return resource_id
+
+
+CHAIN_PATTERN = re.compile(r"[a-z0-9][a-z0-9_\-]{0,31}")
+
+
+def sanitize_chain(chain, default: str = "ethereum") -> str:
+    """
+    Validate a chain name such as "ethereum" or "bsc" (lowercased).
+    Mirrors BusinessAnalyserOutput.chain, which defaults to "ethereum".
+    """
+    if chain is None:
+        return default
+    if not isinstance(chain, str):
+        raise InvalidInputError("chain must be a string.")
+    chain = chain.strip().lower()
+    if not CHAIN_PATTERN.fullmatch(chain):
+        raise InvalidInputError("chain does not match the expected format.")
+    return chain
 
 
 def sanitize_options(options: dict, config: WrapperConfig = DEFAULT_CONFIG) -> dict:
@@ -90,3 +113,29 @@ def sanitize_output(value: str) -> str:
         .replace("'", "&#x27;")
     )
     return value
+
+
+MAX_OUTPUT_DEPTH = 10
+
+
+def sanitize_output_tree(value, _depth: int = 0):
+    """
+    Apply sanitize_output to every string in a provider response, including
+    dict keys and nested lists/dicts. Non-JSON types are dropped, and
+    nesting beyond MAX_OUTPUT_DEPTH is rejected, so nothing unexpected
+    reaches the bot.
+    """
+    if _depth > MAX_OUTPUT_DEPTH:
+        raise ValueError("Provider response is nested too deeply.")
+    if isinstance(value, str):
+        return sanitize_output(value)
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, dict):
+        return {
+            sanitize_output(str(k)): sanitize_output_tree(v, _depth + 1)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [sanitize_output_tree(v, _depth + 1) for v in value]
+    return None

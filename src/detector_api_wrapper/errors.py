@@ -12,3 +12,7 @@ class InvalidInputError(ValueError):
 
 class ProviderError(RuntimeError):
     """Raised when a provider call fails, times out, or is misconfigured."""
+
+
+class NotFoundError(ProviderError):
+    """Raised when the provider reports it has no record for the resource."""

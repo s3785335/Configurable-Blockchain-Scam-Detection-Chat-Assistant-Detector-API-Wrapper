@@ -6,6 +6,12 @@ sanitized output so results can be traced back to their source later.
 
 Intentionally minimal: swap `_emit` for your real logging/observability
 stack (structured logger, log shipping, etc.) without touching callers.
+
+Containers: this uses the standard `logging` module and never writes
+files itself, so the host application (e.g. the bot's container) decides
+where records go. Sending them to stdout lets `docker logs` and log
+collectors pick them up. Request headers, and therefore API keys, are
+never passed to this module.
 """
 
 import logging

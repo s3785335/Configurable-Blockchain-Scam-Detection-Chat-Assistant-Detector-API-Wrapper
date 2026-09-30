@@ -1,0 +1,51 @@
+{
+  "providers": [
+    {
+      "name": "acme",
+      "url": "https://api.acme.example/v1/address-risk",
+      "method": "GET",
+      "id_param": "address",
+      "chain_param": "network",
+      "api_key_env": "API_WRAPPER_KEY",
+      "auth_header": "Authorization",
+      "auth_scheme": "Bearer",
+      "option_params": {"mode": "strictness"},
+      "mapping": {
+        "label": {
+          "path": "result.verdict",
+          "values": {
+            "malicious": "scam",
+            "suspicious": "scam",
+            "clean": "not_scam",
+            "unknown": "insufficient_evidence"
+          }
+        },
+        "confidence": {"path": "result.confidence", "scale": 100},
+        "risk_type": {"path": "result.category"},
+        "evidence": {
+          "path": "result.findings",
+          "description": "message",
+          "weight": "severity",
+          "weight_scale": 10
+        },
+        "explanation": {"path": "result.summary"}
+      }
+    },
+    {
+      "name": "scorer",
+      "url": "https://risk.scorer.example/score",
+      "method": "POST",
+      "id_param": "address",
+      "required_input_type": "address_with_context",
+      "context_param": "context",
+      "api_key_env": "SCORER_API_KEY",
+      "auth_header": "X-Api-Key",
+      "auth_scheme": "",
+      "mapping": {
+        "risk_score": {"path": "risk", "scale": 100},
+        "label": {"from_score": true, "scam_threshold": 0.7},
+        "evidence": {"path": "reasons", "default_weight": 0.5}
+      }
+    }
+  ]
+}
