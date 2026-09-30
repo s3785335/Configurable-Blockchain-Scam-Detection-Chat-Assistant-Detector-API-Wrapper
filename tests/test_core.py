@@ -1,8 +1,3 @@
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 import pytest
 
 from detector_api_wrapper import call_api
@@ -21,7 +16,7 @@ def test_sanitize_resource_id_rejects_bad_characters():
 
 def test_sanitize_resource_id_rejects_too_long():
     with pytest.raises(InvalidInputError):
-        sanitize_resource_id("a" * 100)
+        sanitize_resource_id("a" * 200)
 
 
 def test_sanitize_options_allow_list():

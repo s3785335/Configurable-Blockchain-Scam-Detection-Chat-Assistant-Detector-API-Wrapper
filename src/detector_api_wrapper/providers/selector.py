@@ -1,28 +1,49 @@
 """
 Provider selection.
 
-Decides which backend/provider to call, based on the request type or a
-manual override (the override itself is handled in core.call_api).
+Order of precedence:
+  1. A manual `provider=` argument to call_api (handled here too, so it is
+     checked against the registry like any other choice).
+  2. The configured default (DETECTOR_PROVIDER).
+  3. The only registered provider, if exactly one exists.
+Anything else raises ProviderError, which core.call_api turns into a
+status="error" result (fail closed) rather than guessing.
 """
 
-from ..config import WrapperConfig, DEFAULT_CONFIG
-
-# Registry of available provider names. Populate as real adapters are
-# added under providers/ (e.g. providers/example_provider.py).
-AVAILABLE_PROVIDERS: list[str] = []
+from ..config import DEFAULT_CONFIG, WrapperConfig
+from ..errors import ProviderError
+from .registry import list_providers
 
 
-def select_provider(options: dict, config: WrapperConfig = DEFAULT_CONFIG) -> str:
-    """
-    Choose a provider automatically based on sanitized options.
+def select_provider(
+    options: dict,
+    config: WrapperConfig = DEFAULT_CONFIG,
+    override: str | None = None,
+) -> str:
+    registered = list_providers()
 
-    Intentional stub: real selection logic depends on which providers are
-    registered and what routing rules the client wants. Wire this in once
-    at least one real provider adapter exists.
-    """
-    if not AVAILABLE_PROVIDERS:
-        raise RuntimeError(
-            "No providers registered. Add a provider adapter under "
-            "providers/ and register it in AVAILABLE_PROVIDERS."
+    if override is not None:
+        if override not in registered:
+            raise ProviderError(f"Provider '{override}' is not registered.")
+        return override
+
+    if config.default_provider:
+        if config.default_provider not in registered:
+            raise ProviderError(
+                f"Default provider '{config.default_provider}' (DETECTOR_PROVIDER) "
+                "is not registered."
+            )
+        return config.default_provider
+
+    if len(registered) == 1:
+        return registered[0]
+
+    if not registered:
+        raise ProviderError(
+            "No providers registered. Describe your API in the provider config "
+            "(DETECTOR_CONFIG_PATH) or register a custom adapter."
         )
-    return AVAILABLE_PROVIDERS[0]
+    raise ProviderError(
+        "Multiple providers are registered; set DETECTOR_PROVIDER or pass "
+        "provider= to choose one."
+    )
