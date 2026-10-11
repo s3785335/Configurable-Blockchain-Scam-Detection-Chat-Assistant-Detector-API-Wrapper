@@ -64,6 +64,71 @@ via `API_WRAPPER_KEY_FILE` (Docker secrets). Audit records go through the
 standard `logging` module, so route them to stdout in the host container.
 The cache and rate limit are per process, so each replica keeps its own.
 
+### Docker image setup
+
+The wrapper can be hosted on its own as a standalone container, exposing
+itself over a small HTTP API (`src/detector_api_wrapper/api.py`) so other
+services can reach it over the network rather than importing it as a
+Python library. **This container is not yet wired up to the main
+application** — this step only sets up the environment in isolation.
+
+**Prerequisites**
+
+- Docker and Docker Compose.
+- A `.env` file in the repo root (copy `.env.example`), with a real
+  `API_WRAPPER_KEY` or `API_WRAPPER_KEY_FILE` — never commit `.env`.
+- A provider config — `docker-compose.yml` mounts
+  `examples/providers.example.json` by default; swap in your own via the
+  `DETECTOR_CONFIG_PATH` volume mount or `DETECTOR_CONFIG_JSON`.
+
+**Build and run**
+
+```bash
+cp .env.example .env
+# edit .env: set API_WRAPPER_KEY (or API_WRAPPER_KEY_FILE)
+
+docker compose up --build
+```
+
+Exposes the service on `http://localhost:8000`.
+
+**Image details**
+
+- **Base image:** `python:3.12-slim`
+- **Installed as:** the package plus its `api` extra (`fastapi`,
+  `uvicorn`), via `pip install ".[api]"`
+- **Runs as:** a non-root user (`appuser`)
+- **Entry point:** `uvicorn detector_api_wrapper.api:app --host 0.0.0.0 --port 8000`
+- **Exposed port:** `8000`
+- **Healthcheck:** `GET /health`, polled every 30s
+
+**Endpoints**
+
+| Method | Path         | Description |
+|--------|--------------|--------------|
+| GET    | `/health`    | Liveness check, returns `{"status": "ok"}` |
+| GET    | `/status`    | Which detector is selected/configured (`?provider=` optional); mirrors `detector_status()` |
+| GET    | `/detectors` | Names of all registered detectors |
+| POST   | `/call`      | Body: `{"resource_id": "...", "options": {}, "provider": null, "chain": null, "context": null}`. Returns the `ApiResult` envelope as JSON. |
+| GET    | `/docs`      | Interactive Swagger UI (FastAPI auto-generated) |
+
+**Verifying it locally**
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/detectors
+curl -X POST http://localhost:8000/call \
+  -H "Content-Type: application/json" \
+  -d '{"resource_id": "0x1234567890abcdef1234567890abcdef12345678", "provider": "acme", "chain": "ethereum"}'
+```
+
+**Stopping / rebuilding**
+
+```bash
+docker compose down          # stop and remove the container
+docker compose up --build    # rebuild after code changes
+```
+
 ## Project layout
 
 ```
