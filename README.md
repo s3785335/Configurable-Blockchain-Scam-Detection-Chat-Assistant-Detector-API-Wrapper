@@ -90,7 +90,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Exposes the service on `http://localhost:8000`.
+Exposes the service on `http://localhost:8002`.
 
 **Image details**
 
@@ -99,7 +99,7 @@ Exposes the service on `http://localhost:8000`.
   `uvicorn`), via `pip install ".[api]"`
 - **Runs as:** a non-root user (`appuser`)
 - **Entry point:** `uvicorn detector_api_wrapper.api:app --host 0.0.0.0 --port 8000`
-- **Exposed port:** `8000`
+- **Exposed port:** `8000` inside the container, published on host port `8002` (the chat app uses 8000)
 - **Healthcheck:** `GET /health`, polled every 30s
 
 **Endpoints**
@@ -115,9 +115,9 @@ Exposes the service on `http://localhost:8000`.
 **Verifying it locally**
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/detectors
-curl -X POST http://localhost:8000/call \
+curl http://localhost:8002/health
+curl http://localhost:8002/detectors
+curl -X POST http://localhost:8002/call \
   -H "Content-Type: application/json" \
   -d '{"resource_id": "0x1234567890abcdef1234567890abcdef12345678", "provider": "acme", "chain": "ethereum"}'
 ```
