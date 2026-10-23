@@ -1,36 +1,3 @@
-"""
-Generic HTTP adapter: the "no code" way for a client to plug in their
-detector API.
-
-A client describes their detector in the provider config (a JSON file
-mounted into the container at DETECTOR_CONFIG_PATH, or inline in
-DETECTOR_CONFIG_JSON). The "mapping" section translates the detector's
-response into the main application's DetectionResult. See
-examples/providers.example.json for a full example, and the README for
-every option.
-
-Mapping options (each field takes a dot "path" into the response JSON):
-  label            {"path": ..., "values": {"<provider value>": "scam" | "not_scam" | "insufficient_evidence"}}
-                   or {"from_score": true, "scam_threshold": 0.7} to derive it from risk_score
-  risk_score       {"path": ..., "scale": 100}   provider's risk score, scaled to 0-1
-  confidence       {"path": ..., "scale": 1}     optional if label comes from risk_score
-  risk_type        {"path": ..., "values": {...}} values map optional
-  evidence         {"path": <list>, "description": <item path>, "weight": <item path>,
-                    "weight_scale": 1, "default_weight": 0.5}
-  explanation      {"path": ...}   optional: a plain-language default is generated
-  reasoning_trace  {"path": ...}   optional
-
-Security:
-  - HTTPS only, unless "allow_insecure_http": true is set explicitly (for
-    a detector running as another container on a private Docker network).
-  - The identifier is sent as a query/body parameter, never pasted into
-    the URL string.
-  - Redirects are not followed, so a detector can't bounce the request
-    (and its API key) somewhere else.
-  - Error messages include the HTTP status, never the response body or
-    the credential.
-"""
-
 import re
 from urllib.parse import urlsplit
 
@@ -54,9 +21,7 @@ _ALLOWED_KEYS = {
 _MAPPING_FIELDS = set(DetectionResult.model_fields) | {"risk_score"}
 _LABELS = {"scam", "not_scam", "insufficient_evidence"}
 
-
 def _resolve_path(data, path: str):
-    """Follow a dot path like 'data.items.0.score'. Returns (found, value)."""
     current = data
     for part in path.split("."):
         if isinstance(current, dict) and part in current:
@@ -66,7 +31,6 @@ def _resolve_path(data, path: str):
         else:
             return False, None
     return True, current
-
 
 class GenericHttpAdapter(ProviderAdapter):
     def __init__(
@@ -156,8 +120,6 @@ class GenericHttpAdapter(ProviderAdapter):
             kwargs["not_found_status"] = tuple(kwargs["not_found_status"])
         return cls(**kwargs)
 
-    # -- request building ---------------------------------------------------
-
     def _build_request(self, req: DetectorRequest) -> dict:
         params = dict(self.static_params)
         for option_key, provider_key in self.option_params.items():
@@ -199,8 +161,6 @@ class GenericHttpAdapter(ProviderAdapter):
             raise ProviderError(f"Provider '{self.name}' returned JSON that is not an object.")
         return data
 
-    # -- ProviderAdapter ----------------------------------------------------
-
     def is_configured(self) -> bool:
         if not self.api_key_env:
             return True
@@ -241,9 +201,8 @@ class GenericHttpAdapter(ProviderAdapter):
         return self._parse_response(response)
 
     def to_schema(self, raw: dict) -> dict:
-        """Translate the detector's response into DetectionResult fields."""
         if not self.mapping:
-            return raw  # detector already responds in DetectionResult shape
+            return raw
         m = self.mapping
         out: dict = {}
 
@@ -257,7 +216,6 @@ class GenericHttpAdapter(ProviderAdapter):
                 raise ProviderError("Mapping: label.from_score needs risk_score, which was missing.")
             threshold = float(label_spec.get("scam_threshold", 0.5))
             out["label"] = "scam" if risk >= threshold else "not_scam"
-            # Confidence is strength of evidence for the chosen label.
             out["confidence"] = risk if out["label"] == "scam" else 1.0 - risk
         elif label_spec:
             found, value = _resolve_path(raw, label_spec["path"])
@@ -268,6 +226,14 @@ class GenericHttpAdapter(ProviderAdapter):
             value = _number(raw, m["confidence"], "confidence")
             if value is not None:
                 out["confidence"] = value
+
+        for rule in label_spec.get("overrides", []):
+            found, value = _resolve_path(raw, rule["path"])
+            if found and _matches(value, rule["equals"]):
+                out["label"] = rule["label"]
+                if rule["label"] == "insufficient_evidence":
+                    out["confidence"] = 0.0
+                break
 
         for text_field in ("risk_type", "explanation", "reasoning_trace"):
             if text_field in m:
@@ -280,9 +246,7 @@ class GenericHttpAdapter(ProviderAdapter):
             out["evidence"] = _map_evidence(raw, m["evidence"])
         return out
 
-
 def _validate_mapping(name: str, mapping) -> None:
-    """Catch config mistakes at startup instead of on the first lookup."""
     if not isinstance(mapping, dict):
         raise ValueError(f"Provider '{name}': mapping must be an object.")
     unknown = set(mapping) - _MAPPING_FIELDS
@@ -302,7 +266,28 @@ def _validate_mapping(name: str, mapping) -> None:
             )
     if label.get("from_score") and "risk_score" not in mapping:
         raise ValueError(f"Provider '{name}': label.from_score requires a risk_score mapping.")
+    overrides = label.get("overrides", [])
+    if not isinstance(overrides, list):
+        raise ValueError(f"Provider '{name}': mapping.label.overrides must be a list.")
+    for i, rule in enumerate(overrides):
+        if not isinstance(rule, dict) or "path" not in rule or "equals" not in rule:
+            raise ValueError(
+                f"Provider '{name}': mapping.label.overrides[{i}] needs 'path', 'equals' and 'label'."
+            )
+        if rule.get("label") not in _LABELS:
+            raise ValueError(
+                f"Provider '{name}': mapping.label.overrides[{i}].label must be one of {sorted(_LABELS)}."
+            )
 
+def _matches(value, expected) -> bool:
+    if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        try:
+            return float(value) == float(expected)
+        except (TypeError, ValueError):
+            return False
+    if isinstance(expected, str) and isinstance(value, str):
+        return value.strip().lower() == expected.strip().lower()
+    return value == expected
 
 def _translate(value, values: dict | None, field_name: str):
     if values is None:
@@ -310,9 +295,7 @@ def _translate(value, values: dict | None, field_name: str):
     for provider_value, ours in values.items():
         if str(value).strip().lower() == str(provider_value).strip().lower():
             return ours
-    # Unknown value: fail closed rather than guess a verdict.
     raise ProviderError(f"Mapping: unrecognised {field_name} value from detector.")
-
 
 def _number(raw, spec: dict, field_name: str):
     found, value = _resolve_path(raw, spec["path"])

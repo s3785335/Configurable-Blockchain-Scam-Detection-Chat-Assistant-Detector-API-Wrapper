@@ -37,7 +37,6 @@ GOOD = {"result": {
     "summary": "Liquidity was pulled shortly after launch.",
 }}
 
-
 def make_adapter(handler, **overrides):
     kwargs = dict(
         name="mock",
@@ -50,33 +49,25 @@ def make_adapter(handler, **overrides):
     kwargs.update(overrides)
     return GenericHttpAdapter(**kwargs)
 
-
 def ok_handler(request):
     return httpx.Response(200, json=GOOD)
 
-
 def json_handler(payload):
     return lambda request: httpx.Response(200, json=payload)
-
-
-# --- fail-closed behaviour -----------------------------------------------
 
 def test_no_providers_returns_error_instead_of_crashing():
     result = call_api(ADDR, config=CFG)
     assert result.status == "error" and result.result is None
     assert "No providers registered" in result.error
 
-
 def test_unknown_override_returns_error():
     register_provider(make_adapter(ok_handler))
     assert call_api(ADDR, provider="nope", config=CFG).status == "error"
-
 
 def test_multiple_providers_without_default_returns_error():
     register_provider(make_adapter(ok_handler))
     register_provider(make_adapter(ok_handler, name="mock2"))
     assert call_api(ADDR, config=CFG).status == "error"
-
 
 def test_default_provider_is_used():
     register_provider(make_adapter(ok_handler))
@@ -84,29 +75,24 @@ def test_default_provider_is_used():
     cfg = WrapperConfig(rate_limit_per_second=0, default_provider="mock2")
     assert call_api(ADDR, config=cfg).provider == "mock2"
 
-
 def test_missing_key_returns_error(monkeypatch):
     monkeypatch.delenv("API_WRAPPER_KEY")
     register_provider(make_adapter(ok_handler))
     result = call_api(ADDR, config=CFG)
     assert result.status == "error" and "API_WRAPPER_KEY" in result.error
 
-
-# --- mapping to DetectionResult -------------------------------------------
-
 def test_full_mapping_produces_detection_result():
     register_provider(make_adapter(ok_handler))
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "ok"
     r = outcome.result
-    assert r.label == "scam"            # case-insensitive value mapping
-    assert r.confidence == 0.85         # scaled 85 -> 0.85
+    assert r.label == "scam"
+    assert r.confidence == 0.85
     assert r.risk_type == "rug_pull"
-    assert r.evidence[0].weight == 0.9  # scaled 9 -> 0.9
+    assert r.evidence[0].weight == 0.9
     assert r.evidence[0].description == "Liquidity removed &lt;b&gt;fast&lt;/b&gt;"
     assert r.explanation == "Liquidity was pulled shortly after launch."
-    assert r.reasoning_trace  # default provenance trace filled in
-
+    assert r.reasoning_trace
 
 def test_unknown_label_value_fails_closed():
     payload = json.loads(json.dumps(GOOD))
@@ -115,18 +101,15 @@ def test_unknown_label_value_fails_closed():
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "error" and outcome.result is None
 
-
 def test_missing_label_fails_closed():
     register_provider(make_adapter(json_handler({"result": {"confidence": 50}})))
     assert call_api(ADDR, config=CFG).status == "error"
 
-
 def test_out_of_range_confidence_fails_closed():
-    mapping = {**MAPPING, "confidence": {"path": "result.confidence"}}  # forgot scale
+    mapping = {**MAPPING, "confidence": {"path": "result.confidence"}}
     register_provider(make_adapter(ok_handler, mapping=mapping))
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "error" and "scale" in outcome.error
-
 
 def test_missing_explanation_gets_default():
     payload = json.loads(json.dumps(GOOD))
@@ -134,7 +117,6 @@ def test_missing_explanation_gets_default():
     register_provider(make_adapter(json_handler(payload)))
     r = call_api(ADDR, config=CFG).result
     assert "mock" in r.explanation and "scam" in r.explanation
-
 
 def test_label_from_risk_score():
     mapping = {
@@ -149,7 +131,6 @@ def test_label_from_risk_score():
     assert r.confidence == pytest.approx(0.8)
     assert r.evidence[0].description == "Verified source" and r.evidence[0].weight == 0.5
 
-
 def test_passthrough_when_detector_already_speaks_schema():
     native = {"label": "not_scam", "confidence": 0.7, "explanation": "Looks fine.",
               "evidence": [{"description": "Verified", "weight": 0.6}]}
@@ -157,13 +138,11 @@ def test_passthrough_when_detector_already_speaks_schema():
     r = call_api(ADDR, config=CFG).result
     assert r.label == "not_scam" and r.evidence[0].weight == 0.6
 
-
 def test_404_returns_insufficient_evidence():
     register_provider(make_adapter(lambda r: httpx.Response(404)))
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "not_found"
     assert outcome.result.label == "insufficient_evidence"
-
 
 def test_result_passes_main_app_validation():
     """What the main app does: DetectionResult(**data)."""
@@ -171,9 +150,6 @@ def test_result_passes_main_app_validation():
     register_provider(make_adapter(ok_handler))
     data = call_api(ADDR, config=CFG).to_dict()["result"]
     assert DetectionResult(**data).label == "scam"
-
-
-# --- request building -----------------------------------------------------
 
 def test_request_params_and_auth():
     seen = {}
@@ -186,19 +162,15 @@ def test_request_params_and_auth():
                                    option_params={"mode": "strictness"}))
     call_api(ADDR, options={"mode": "strict"}, chain="BSC", config=CFG)
     req = seen["request"]
-    assert req.url.path == "/v1/check"  # id not interpolated into the path
+    assert req.url.path == "/v1/check"
     assert req.url.params["address"] == ADDR
     assert req.url.params["network"] == "bsc"
     assert req.url.params["strictness"] == "strict"
     assert req.headers["Authorization"] == "Bearer test-key"
 
-
 def test_invalid_chain_rejected():
     register_provider(make_adapter(ok_handler))
     assert call_api(ADDR, chain="eth/../x", config=CFG).status == "error"
-
-
-# --- address_with_context detectors --------------------------------------
 
 def context_for(address, chain="ethereum"):
     return {
@@ -206,7 +178,6 @@ def context_for(address, chain="ethereum"):
         "tx_history": [{"hash": "0x1", "from": "0xa", "to": "0xb", "value": "1",
                         "timestamp": "2026-09-01T00:00:00Z"}],
     }
-
 
 def test_context_detector_receives_context_with_aliases():
     seen = {}
@@ -221,13 +192,11 @@ def test_context_detector_receives_context_with_aliases():
     assert outcome.status == "ok"
     assert seen["body"]["context"]["tx_history"][0]["from"] == "0xa"
 
-
 def test_context_detector_without_context_errors():
     register_provider(make_adapter(ok_handler, method="POST",
                                    required_input_type="address_with_context"))
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "error" and "AddressContext" in outcome.error
-
 
 def test_context_for_other_address_rejected():
     register_provider(make_adapter(ok_handler, method="POST",
@@ -235,13 +204,9 @@ def test_context_for_other_address_rejected():
     other = "0x" + "cd" * 20
     assert call_api(ADDR, context=context_for(other), config=CFG).status == "error"
 
-
 def test_context_detector_must_use_post():
     with pytest.raises(ValueError):
         make_adapter(ok_handler, required_input_type="address_with_context")
-
-
-# --- transport failures ---------------------------------------------------
 
 def test_http_error_returns_error_without_body():
     register_provider(make_adapter(lambda r: httpx.Response(500, text="secret internal detail")))
@@ -249,11 +214,9 @@ def test_http_error_returns_error_without_body():
     assert outcome.status == "error"
     assert "500" in outcome.error and "secret" not in outcome.error
 
-
 def test_non_json_returns_error():
     register_provider(make_adapter(lambda r: httpx.Response(200, text="<html>")))
     assert call_api(ADDR, config=CFG).status == "error"
-
 
 def test_timeout_returns_error():
     def handler(request):
@@ -263,12 +226,10 @@ def test_timeout_returns_error():
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "error" and "timed out" in outcome.error
 
-
 def test_redirects_are_not_followed():
     register_provider(make_adapter(
         lambda r: httpx.Response(302, headers={"Location": "https://evil.example/"})))
     assert call_api(ADDR, config=CFG).status == "error"
-
 
 def test_results_are_cached_and_copied():
     calls = []
@@ -279,18 +240,14 @@ def test_results_are_cached_and_copied():
 
     register_provider(make_adapter(handler))
     call_api(ADDR, config=CFG)
-    call_api(ADDR, config=CFG).result.confidence = 0.0  # must not affect cache
+    call_api(ADDR, config=CFG).result.confidence = 0.0
     assert call_api(ADDR, config=CFG).result.confidence == 0.85
     assert len(calls) == 1
-
 
 def test_async_path():
     register_provider(make_adapter(ok_handler))
     outcome = asyncio.run(call_api_async(ADDR, config=CFG))
     assert outcome.status == "ok" and outcome.result.label == "scam"
-
-
-# --- adapter config validation -------------------------------------------
 
 @pytest.mark.parametrize("url", ["http://detector.example", "ftp://x", "not a url",
                                  "https://user:pw@detector.example"])
@@ -298,11 +255,9 @@ def test_rejects_unsafe_urls(url):
     with pytest.raises(ValueError):
         GenericHttpAdapter(name="x", url=url, id_param="id")
 
-
 def test_allows_http_only_when_explicit():
     GenericHttpAdapter(name="x", url="http://detector:8000/check", id_param="id",
                        allow_insecure_http=True)
-
 
 @pytest.mark.parametrize("definition", [
     {"urll": "typo"},
@@ -314,9 +269,6 @@ def test_rejects_bad_config(definition):
     base = {"name": "x", "url": "https://a.example", "id_param": "id"}
     with pytest.raises(ValueError):
         GenericHttpAdapter.from_definition({**base, **definition})
-
-
-# --- custom adapters -----------------------------------------------------
 
 class EvmOnly(ProviderAdapter):
     name = "evm"
@@ -332,13 +284,11 @@ class EvmOnly(ProviderAdapter):
         if not resource_id.startswith("0x"):
             raise InvalidInputError("not an EVM address")
 
-
 def test_custom_adapter_and_validation_hook():
     register_provider(EvmOnly())
     assert call_api(ADDR, config=CFG).result.confidence == pytest.approx(0.9)
     bad = call_api("abc", config=CFG)
     assert bad.status == "error" and "EVM" in bad.error
-
 
 def test_custom_adapter_unexpected_exception_is_hidden():
     class Broken(EvmOnly):
@@ -351,9 +301,6 @@ def test_custom_adapter_unexpected_exception_is_hidden():
     outcome = call_api(ADDR, config=CFG)
     assert outcome.status == "error" and "secret" not in outcome.error
 
-
-# --- BusinessAnalyser support --------------------------------------------
-
 def test_detector_status_reports_configured(monkeypatch):
     register_provider(make_adapter(ok_handler, method="POST",
                                    required_input_type="address_with_context"))
@@ -363,12 +310,8 @@ def test_detector_status_reports_configured(monkeypatch):
     monkeypatch.delenv("API_WRAPPER_KEY")
     assert detector_status(config=CFG)["detector_configured"] is False
 
-
 def test_detector_status_with_nothing_registered():
     assert detector_status(config=CFG)["detector_configured"] is False
-
-
-# --- configuration / container concerns ----------------------------------
 
 def test_config_file_registers_provider(tmp_path, monkeypatch):
     path = tmp_path / "providers.json"
@@ -380,7 +323,6 @@ def test_config_file_registers_provider(tmp_path, monkeypatch):
     cfg = load_config()
     assert cfg.timeout_seconds == 2.5 and cfg.providers[0]["name"] == "fromfile"
 
-
 def test_key_from_secret_file(tmp_path, monkeypatch):
     monkeypatch.delenv("API_WRAPPER_KEY")
     secret = tmp_path / "key"
@@ -388,11 +330,9 @@ def test_key_from_secret_file(tmp_path, monkeypatch):
     monkeypatch.setenv("API_WRAPPER_KEY_FILE", str(secret))
     assert get_api_key() == "from-file"
 
-
 def test_accepts_evm_tx_hash_length():
     register_provider(make_adapter(ok_handler))
     assert call_api("0x" + "a" * 64, config=CFG).status == "ok"
-
 
 def test_output_tree_rejects_deep_nesting():
     deep = current = {}
@@ -401,3 +341,50 @@ def test_output_tree_rejects_deep_nesting():
         current = current["x"]
     with pytest.raises(ValueError):
         sanitize_output_tree(deep)
+
+from types import SimpleNamespace
+
+import pytest
+
+from detector_api_wrapper.providers.http_adapter import GenericHttpAdapter, _validate_mapping
+
+OVERRIDE_MAPPING = {
+    "risk_score": {"path": "riskScore", "scale": 100},
+    "label": {
+        "from_score": True,
+        "scam_threshold": 0.7,
+        "overrides": [
+            {"path": "addressInfo.txCount", "equals": 0, "label": "insufficient_evidence"},
+            {"path": "riskLevel", "equals": "unknown", "label": "insufficient_evidence"},
+        ],
+    },
+}
+
+def _map(raw):
+    return GenericHttpAdapter.to_schema(SimpleNamespace(mapping=OVERRIDE_MAPPING), raw)
+
+def test_override_forces_insufficient_evidence_for_unused_address():
+    out = _map({"riskLevel": "low", "riskScore": 0, "addressInfo": {"txCount": 0}})
+    assert out["label"] == "insufficient_evidence" and out["confidence"] == 0.0
+
+def test_override_matches_string_case_insensitively():
+    out = _map({"riskLevel": "Unknown", "riskScore": 0, "addressInfo": {"txCount": 5}})
+    assert out["label"] == "insufficient_evidence"
+
+def test_no_override_match_keeps_score_label():
+    out = _map({"riskLevel": "low", "riskScore": 0, "addressInfo": {"txCount": 120}})
+    assert out["label"] == "not_scam"
+
+def test_missing_override_path_is_skipped():
+    out = _map({"riskLevel": "low", "riskScore": 90})
+    assert out["label"] == "scam"
+
+@pytest.mark.parametrize("overrides", [
+    {"path": "x", "equals": 0, "label": "x"},
+    [{"path": "x", "label": "insufficient_evidence"}],
+    [{"path": "x", "equals": 0, "label": "definitely_scam"}],
+])
+def test_bad_overrides_rejected(overrides):
+    mapping = {"label": {"path": "v", "overrides": overrides}}
+    with pytest.raises(ValueError):
+        _validate_mapping("p", mapping)
