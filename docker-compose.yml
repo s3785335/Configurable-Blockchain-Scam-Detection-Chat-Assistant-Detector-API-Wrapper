@@ -1,0 +1,35 @@
+# Hosts the Detector API Wrapper as its own standalone service.
+#
+# Scope: this is environment setup only. The main application is NOT
+# wired up to call this service yet -- that integration is a later task.
+#
+# Config is entirely environment-driven (see .env.example and the
+# "Running in containers" section of README.md):
+#   - API_WRAPPER_KEY / API_WRAPPER_KEY_FILE  -- credential, direct or mounted secret
+#   - DETECTOR_CONFIG_PATH                    -- provider definitions, mounted file
+#   - DETECTOR_ADAPTER_MODULES                -- custom adapter modules, if any
+
+services:
+  detector-api-wrapper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: detector-api-wrapper:local
+    container_name: detector-api-wrapper
+    ports:
+      - "8002:8000"
+    env_file:
+      - .env
+    environment:
+      - API_WRAPPER_KEY=${API_WRAPPER_KEY:-}
+      - DETECTOR_CONFIG_PATH=/config/providers.json
+    volumes:
+      # Mount your provider config read-only -- see examples/providers.example.json.
+      - ./examples/providers.example.json:/config/providers.json:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
