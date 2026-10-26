@@ -1,185 +1,389 @@
 # Detector API Wrapper
 
-Lets a client plug the scam-detector API of their choice into the
-Blockchain Scam Detection Chat Assistant. Whatever the detector returns is
-translated into the main application's `DetectionResult`, so the bot
-treats every detector the same way. Includes input/output sanitization,
-caching, rate limiting and fail-closed error handling.
+A standalone service that lets the **Configurable Blockchain Scam Detection Chat Assistant** use any external scam-detection API.
 
-## Zero-configure usage
+Every detector API returns results in its own format. The wrapper calls the detector you configure and converts its reply into the chat assistant's standard result (label, confidence, evidence), so the chat app never needs provider-specific code. Adding a new detector means editing a JSON file, not writing code.
+
+```
+Chat assistant  --POST /call-->  Detector API Wrapper  --HTTPS-->  External detector API
+                <--standard result--                   <--raw JSON--
+```
+
+## Features
+
+- **Config-driven providers.** Each detector is one JSON entry: its URL, how to authenticate, and how to map its reply.
+- **Strict input checks.** Addresses and options are validated against allow-lists. Bad input is rejected, never "cleaned".
+- **Fails closed.** Bad input, a timeout, a missing key or a provider error returns `status: "error"` with a reason. The wrapper never returns a made-up verdict.
+- **Keys stay out of the code.** API keys are read from environment variables (or a mounted secret file) and are never logged or returned.
+- **Label overrides.** A mapping can force `insufficient_evidence` based on another field, for example when a detector has never seen an address.
+- **Timeouts, rate limiting and a short-lived cache** for every provider call.
+- **Runs in Docker** as its own HTTP service, or can be imported as a Python library.
+
+## Quick start (Docker)
+
+Requirements: Docker Desktop (or Docker Engine with Compose).
+
+```bash
+git clone https://github.com/s3785335/Configurable-Blockchain-Scam-Detection-Chat-Assistant-Detector-API-Wrapper.git
+cd Configurable-Blockchain-Scam-Detection-Chat-Assistant-Detector-API-Wrapper
+
+cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
+# edit .env and set your provider API key(s)
+
+docker compose up --build -d
+```
+
+The service runs on **http://localhost:8002**. (It listens on 8000 inside the container; it is published on host port 8002 so it doesn't clash with the chat app, which uses 8000.)
+
+Check it's running:
+
+```bash
+curl http://localhost:8002/health        # {"status":"ok"}
+curl http://localhost:8002/detectors     # names of the loaded providers
+```
+
+Interactive API docs are at **http://localhost:8002/docs**.
+
+To stop it: `docker compose down`. To rebuild after code changes: `docker compose up --build -d`.
+
+> Out of the box, the wrapper loads `examples/providers.example.json`, which contains two **placeholder** providers (`acme` and `scorer`). Their URLs don't exist, so a `/call` to them returns `status: "error"`. Add your own provider to get real results (see [Configuring a provider](#configuring-a-provider)).
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness check. Returns `{"status": "ok"}`. Does not read provider config, so it stays healthy even if a provider is misconfigured. |
+| GET | `/status` | Which detector would be used and whether it's configured. Optional `?provider=` query. Returns `selected_detector`, `detector_configured` and `required_input_type` (the same fields the chat assistant uses). |
+| GET | `/detectors` | Names of every loaded provider. |
+| POST | `/call` | Runs a check. See below. |
+| GET | `/docs` | Swagger UI (auto-generated). |
+
+### `POST /call`
+
+Request body:
+
+```json
+{
+  "resource_id": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  "provider": "onchainrisk",
+  "chain": "ethereum",
+  "options": {},
+  "context": null
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `resource_id` | Yes | The address to check. |
+| `provider` | No | Which provider to use. If omitted, the wrapper selects one. |
+| `chain` | No | Chain name, passed to the provider if its config defines `chain_param`. |
+| `options` | No | Extra options. Only allow-listed keys and values are accepted. |
+| `context` | No | Address context, for providers with `required_input_type: "address_with_context"`. |
+
+Response:
+
+```json
+{
+  "resource_id": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  "provider": "onchainrisk",
+  "status": "ok",
+  "result": {
+    "label": "not_scam",
+    "confidence": 0.6,
+    "risk_type": null,
+    "evidence": [
+      { "description": "No risky contract functions found", "weight": 0.3 }
+    ],
+    "explanation": "..."
+  },
+  "checked_at": "2026-10-23T13:58:45.685795+00:00",
+  "error": null
+}
+```
+
+- `status` is `ok`, `not_found` or `error`.
+- `result` holds the standard verdict. It is `null` when `status` is `error`.
+- `label` is always one of `scam`, `not_scam` or `insufficient_evidence`.
+- `confidence` and evidence `weight` are between 0 and 1.
+
+On failure:
+
+```json
+{
+  "resource_id": "0x1234567890abcdef1234567890abcdef12345678",
+  "provider": "acme",
+  "status": "error",
+  "result": null,
+  "checked_at": "2026-10-23T13:58:45.685795+00:00",
+  "error": "Provider 'acme' request failed (ConnectError)."
+}
+```
+
+## Configuring a provider
+
+Providers are defined in a JSON file. `docker-compose.yml` mounts it into the container at `/config/providers.json`:
+
+```yaml
+volumes:
+  - ./examples/providers.example.json:/config/providers.json:ro
+```
+
+To use your own providers, create your own file (e.g. `config/providers.json`, which is not committed) and change **only the left-hand side** of that line:
+
+```yaml
+  - ./config/providers.json:/config/providers.json:ro
+```
+
+Then restart: `docker compose up -d --force-recreate`.
+
+> Make sure the file exists before starting the container. If it doesn't, Docker silently creates an empty folder with that name and the wrapper loads no providers (`/detectors` returns `{}`).
+
+### Provider fields
+
+```json
+{
+  "providers": [
+    {
+      "name": "acme",
+      "url": "https://api.acme.example/v1/address-risk",
+      "method": "GET",
+      "id_param": "address",
+      "chain_param": "network",
+      "api_key_env": "API_WRAPPER_KEY",
+      "auth_header": "Authorization",
+      "auth_scheme": "Bearer",
+      "option_params": { "mode": "strictness" },
+      "mapping": { "...": "see below" }
+    }
+  ]
+}
+```
+
+| Field | Description |
+|---|---|
+| `name` | Name used in `/call` and listed by `/detectors`. |
+| `url` | The provider's endpoint. Must be HTTPS, unless plain HTTP has been explicitly allowed for private networks (see `providers/http_adapter.py`). |
+| `method` | `GET` or `POST`. |
+| `id_param` | Name of the parameter the provider expects for the address. |
+| `chain_param` | Optional. Name of the provider's chain/network parameter. |
+| `required_input_type` | `address` (default) or `address_with_context`. |
+| `context_param` | Name of the parameter that carries the context, when `address_with_context` is used. |
+| `api_key_env` | Name of the environment variable that holds this provider's key. The key itself never goes in this file. |
+| `auth_header` | Header the key is sent in, e.g. `Authorization` or `X-Api-Key`. |
+| `auth_scheme` | Prefix before the key, e.g. `Bearer`. Use `""` to send the key on its own. |
+| `option_params` | Maps allowed `options` keys to the provider's parameter names. |
+| `mapping` | How to read the provider's reply. See below. |
+
+### Mapping the reply
+
+Paths use dot notation into the provider's JSON reply, e.g. `result.verdict`.
+
+**Label from a field value:**
+
+```json
+"label": {
+  "path": "result.verdict",
+  "values": {
+    "malicious": "scam",
+    "suspicious": "scam",
+    "clean": "not_scam",
+    "unknown": "insufficient_evidence"
+  }
+}
+```
+
+**Label from a risk score** (score at or above the threshold means `scam`):
+
+```json
+"risk_score": { "path": "risk", "scale": 100 },
+"label": { "from_score": true, "scam_threshold": 0.7 }
+```
+
+**Label overrides.** Checked last; the first match wins. Forcing `insufficient_evidence` also sets confidence to 0. Matching is loose, so `0` matches `"0"` and `"unknown"` matches `"Unknown"`.
+
+```json
+"label": {
+  "from_score": true,
+  "scam_threshold": 0.7,
+  "overrides": [
+    { "path": "addressInfo.txCount", "equals": 0, "label": "insufficient_evidence" },
+    { "path": "riskLevel", "equals": "unknown", "label": "insufficient_evidence" }
+  ]
+}
+```
+
+Use overrides when a detector returns a low risk score for addresses it has never seen, so "no data" isn't reported as "not scam".
+
+**Other fields:**
+
+```json
+"confidence":  { "path": "result.confidence", "scale": 100 },
+"risk_type":   { "path": "result.category" },
+"evidence":    { "path": "result.findings", "description": "message", "weight": "severity", "weight_scale": 10 },
+"explanation": { "path": "result.summary" }
+```
+
+- `scale` divides the raw value to get 0–1 (e.g. `100` for a percentage).
+- For evidence, `path` points at a list; `description` and `weight` name the fields inside each item. If items are plain strings, use `default_weight` instead.
+
+The mapping is validated when the service starts. An unknown field, a label value that isn't one of the three allowed labels, or a malformed override stops the service with a clear error.
+
+### Custom adapters
+
+If a provider can't be described with the JSON config (e.g. it needs several requests), write a Python adapter. See `examples/custom_adapter_example.py`, and load it with the `DETECTOR_ADAPTER_MODULES` environment variable.
+
+## Environment variables
+
+Set these in `.env` (copy `.env.example`). **Never commit `.env`.**
+
+| Variable | Description |
+|---|---|
+| `API_WRAPPER_KEY` | Default provider API key (used by providers whose `api_key_env` is `API_WRAPPER_KEY`). |
+| `API_WRAPPER_KEY_FILE` | Alternative to `API_WRAPPER_KEY`: path to a mounted secret file containing the key (e.g. Docker secrets). |
+| *Provider-specific keys* | Any variable named in a provider's `api_key_env`, e.g. `SCORER_API_KEY`. |
+| `DETECTOR_CONFIG_PATH` | Path to the providers JSON file. Set to `/config/providers.json` in `docker-compose.yml`. |
+| `DETECTOR_CONFIG_JSON` | Alternative to `DETECTOR_CONFIG_PATH`: the providers config as a JSON string. |
+| `DETECTOR_ADAPTER_MODULES` | Comma-separated Python modules that register custom adapters. |
+| `DETECTOR_TIMEOUT_SECONDS` | Timeout for each provider call. Default `20`. |
+
+## Connecting the chat assistant
+
+The chat assistant treats the wrapper like any other external detector. Add a detector entry to the chat app's `config/app_config.json` (or use **+ add source** on its Admin page), then select it on the Admin page or with `ACTIVE_DETECTOR`.
+
+```json
+{
+  "id": "api_wrapper",
+  "name": "Detector API Wrapper",
+  "status": "live",
+  "mode": "generic",
+  "endpoint": "http://localhost:8002/call",
+  "method": "POST",
+  "required_input_type": "address",
+  "is_llm_based": false,
+  "timeout_seconds": 30,
+  "request": {
+    "body_template": {
+      "resource_id": "{{ address }}",
+      "provider": "acme",
+      "chain": "ethereum"
+    }
+  },
+  "response_mapping": {
+    "label": { "path": "$.result.label", "fallback": "insufficient_evidence" },
+    "confidence": { "path": "$.result.confidence", "scale": 1, "default": 0, "measures": "label" },
+    "evidence": {
+      "mode": "list",
+      "list_path": "$.result.evidence",
+      "item": { "description": "$.description", "weight": "$.weight" },
+      "default_weight": 0.3
+    }
+  }
+}
+```
+
+Notes:
+
+- Set `provider` to a name listed by `/detectors`.
+- If the chat app runs **in Docker**, use `http://host.docker.internal:8002/call`, because `localhost` inside its container is the container itself.
+- Keep `timeout_seconds` above the wrapper's own timeout (20 s), so the wrapper's timeout error reaches the bot first.
+- `is_llm_based: false` means the chat app's Forensic Investigator explains the result in plain language.
+- If the wrapper returns `status: "error"`, there is no label, and the chat app replies that it couldn't get a verdict rather than guessing.
+
+Test it:
+
+```powershell
+$env:ACTIVE_DETECTOR = "api_wrapper"
+python cli.py
+```
+
+Ask `Is 0x1234567890abcdef1234567890abcdef12345678 a scam?` and answer the profile question. The detection details should show **Source: Configured detector (Detector API Wrapper)**.
+
+## Running without Docker
+
+Requires Python 3.10 or later.
+
+```bash
+python -m venv .venv
+# Windows: .\.venv\Scripts\Activate.ps1   macOS/Linux: source .venv/bin/activate
+pip install -e ".[api,dev]"
+
+export DETECTOR_CONFIG_PATH=examples/providers.example.json
+# Windows: $env:DETECTOR_CONFIG_PATH = "examples\providers.example.json"
+
+uvicorn detector_api_wrapper.api:app --app-dir src --port 8002
+```
+
+### As a Python library
 
 ```python
 from detector_api_wrapper import call_api
 
-outcome = call_api("0x1234...", chain="ethereum")
-if outcome.status == "error":
-    ...                      # detector unavailable: outcome.error says why
-else:
-    detection = outcome.result   # main app's DetectionResult
+result = call_api(
+    "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+    provider="acme",
+    chain="ethereum",
+)
+print(result.status, result.to_dict())
 ```
 
-`outcome.status` is `"ok"`, `"not_found"` (returned as a
-`DetectionResult` with `label="insufficient_evidence"`) or `"error"`
-(`result` is `None`; the wrapper never invents a verdict).
+`call_api` never raises on a failed lookup. It returns a result with `status="error"` and a reason.
 
-For detectors whose `required_input_type` is `"address_with_context"`,
-pass the fetched `AddressContext` too: `call_api(address, context=ctx)`.
-
-`detector_status()` returns `selected_detector`, `detector_configured`
-and `required_input_type`, matching the `BusinessAnalyserOutput` fields.
-
-Requirements: describe your detector API in a provider config file and
-set its key in the environment (see `.env.example`). No client
-instantiation or manual setup needed.
-
-## Plugging in your detector API
-
-The wrapper is provider-agnostic: the client connects the detector API of
-their choice. There are two routes.
-
-**No code (most REST APIs).** Describe the API in a JSON file and point
-`DETECTOR_CONFIG_PATH` at it (or put the JSON in `DETECTOR_CONFIG_JSON`).
-See `examples/providers.example.json`. The `mapping` section translates
-the detector's response into `DetectionResult` using dot paths, including
-translating verdict values onto the three labels, scaling scores to
-0-1, and mapping evidence lists. A label can also be derived from a risk
-score and threshold. Unrecognised verdicts, missing required fields and
-out-of-range numbers return `status="error"` rather than a guess. Missing
-`explanation` / `reasoning_trace` get plain-language defaults.
-
-**Custom code.** Subclass `ProviderAdapter`, call `register_provider()`,
-and list the module in `DETECTOR_ADAPTER_MODULES`. See
-`examples/custom_adapter_example.py`. Adapters can also add
-provider-specific identifier checks via `validate_resource_id()`.
-
-Provider selection order: `provider=` argument, then `DETECTOR_PROVIDER`,
-then the only registered provider. Anything ambiguous returns
-`status="error"`.
-
-## Running in containers
-
-All configuration comes from environment variables, the provider config
-can be a mounted file, and the API key can be read from a mounted secret
-via `API_WRAPPER_KEY_FILE` (Docker secrets). Audit records go through the
-standard `logging` module, so route them to stdout in the host container.
-The cache and rate limit are per process, so each replica keeps its own.
-
-### Docker image setup
-
-The wrapper can be hosted on its own as a standalone container, exposing
-itself over a small HTTP API (`src/detector_api_wrapper/api.py`) so other
-services can reach it over the network rather than importing it as a
-Python library. **This container is not yet wired up to the main
-application** — this step only sets up the environment in isolation.
-
-**Prerequisites**
-
-- Docker and Docker Compose.
-- A `.env` file in the repo root (copy `.env.example`), with a real
-  `API_WRAPPER_KEY` or `API_WRAPPER_KEY_FILE` — never commit `.env`.
-- A provider config — `docker-compose.yml` mounts
-  `examples/providers.example.json` by default; swap in your own via the
-  `DETECTOR_CONFIG_PATH` volume mount or `DETECTOR_CONFIG_JSON`.
-
-**Build and run**
+## Tests
 
 ```bash
-cp .env.example .env
-# edit .env: set API_WRAPPER_KEY (or API_WRAPPER_KEY_FILE)
-
-docker compose up --build
+pip install -e ".[api,dev]"
+python -m pytest -q
 ```
 
-Exposes the service on `http://localhost:8002`.
+All 58 tests should pass. They cover input sanitising, provider config validation, response mapping, label overrides and fail-closed behaviour.
 
-**Image details**
-
-- **Base image:** `python:3.12-slim`
-- **Installed as:** the package plus its `api` extra (`fastapi`,
-  `uvicorn`), via `pip install ".[api]"`
-- **Runs as:** a non-root user (`appuser`)
-- **Entry point:** `uvicorn detector_api_wrapper.api:app --host 0.0.0.0 --port 8000`
-- **Exposed port:** `8000` inside the container, published on host port `8002` (the chat app uses 8000)
-- **Healthcheck:** `GET /health`, polled every 30s
-
-**Endpoints**
-
-| Method | Path         | Description |
-|--------|--------------|--------------|
-| GET    | `/health`    | Liveness check, returns `{"status": "ok"}` |
-| GET    | `/status`    | Which detector is selected/configured (`?provider=` optional); mirrors `detector_status()` |
-| GET    | `/detectors` | Names of all registered detectors |
-| POST   | `/call`      | Body: `{"resource_id": "...", "options": {}, "provider": null, "chain": null, "context": null}`. Returns the `ApiResult` envelope as JSON. |
-| GET    | `/docs`      | Interactive Swagger UI (FastAPI auto-generated) |
-
-**Verifying it locally**
-
-```bash
-curl http://localhost:8002/health
-curl http://localhost:8002/detectors
-curl -X POST http://localhost:8002/call \
-  -H "Content-Type: application/json" \
-  -d '{"resource_id": "0x1234567890abcdef1234567890abcdef12345678", "provider": "acme", "chain": "ethereum"}'
-```
-
-**Stopping / rebuilding**
-
-```bash
-docker compose down          # stop and remove the container
-docker compose up --build    # rebuild after code changes
-```
-
-## Project layout
+## Project structure
 
 ```
 src/detector_api_wrapper/
-├── core.py              # single public entry point: call_api / call_api_async
-├── sanitize.py           # input & output sanitization (see Security below)
-├── providers/
-│   ├── base.py           # shared adapter interface
-│   ├── http_adapter.py   # generic, config-driven HTTP adapter
-│   ├── registry.py       # registered adapters
-│   └── selector.py       # provider selection
-├── schema.py             # mirror of the main app's DetectionResult / AddressContext
-├── normalize.py          # ApiResult envelope, mapping validation
-├── errors.py              # typed errors
-├── cache.py               # lightweight in-session cache
-├── config.py              # single config object with defaults
-├── ratelimit.py           # per-provider rate limiting
-└── logging_audit.py       # raw request/response audit trail
-examples/                  # provider config + custom adapter examples
-tests/
-docs/
+  api.py              HTTP layer (FastAPI): /health, /status, /detectors, /call
+  core.py             Single entry point: call_api, detector_status, list_detectors
+  sanitize.py         Input validation (addresses, option allow-lists, length caps)
+  config.py           WrapperConfig: timeouts, rate limit, cache TTL, allow-lists
+  schema.py           Result and evidence data structures
+  normalize.py        Converts provider replies into the standard result
+  errors.py           Typed errors
+  cache.py            Short-lived in-memory cache
+  ratelimit.py        Per-provider rate limiting
+  logging_audit.py    Audit log of raw requests and responses (never returned to callers)
+  providers/
+    base.py           Adapter interface
+    http_adapter.py   Generic config-driven HTTP adapter and mapping
+    registry.py       Loads providers from config and custom modules
+    selector.py       Chooses a provider when none is given
+examples/
+  providers.example.json       Placeholder providers showing the config format
+  custom_adapter_example.py    How to write a custom adapter
+tests/                         Unit tests
+Dockerfile                     python:3.12-slim, runs as a non-root user, healthcheck on /health
+docker-compose.yml             Runs the service on host port 8002
+.env.example                   Documents the environment variables (no real values)
 ```
 
-## Security
+## Troubleshooting
 
-Input sanitization is treated as a first-class requirement (stakeholder
-priority), not an afterthought:
+| Problem | Cause and fix |
+|---|---|
+| `failed to connect to the docker API` | Docker Desktop isn't running. Start it and wait for **Engine running**. |
+| `Unable to connect` on port 8002 | The container isn't running (`docker compose ps`), or you're on an old version that publishes port 8000. Pull the latest `develop`. |
+| `/detectors` returns `{}` | The providers file in the volume mount doesn't exist (Docker created a folder instead), or it failed validation. Check `docker compose logs`. |
+| `/detectors` shows only `acme` and `scorer` | The volume still points at `examples/providers.example.json`. Point it at your own file. |
+| `status: error`, `ConnectError` | The provider URL can't be reached. Expected for the placeholder providers. |
+| `status: error` mentioning a key | The variable named in the provider's `api_key_env` isn't set in `.env`. Restart after editing `.env`. |
+| Checks time out | Raise `DETECTOR_TIMEOUT_SECONDS` in `.env`. Some providers take 5–8 seconds. |
 
-- Identifiers are validated against a strict allow-list pattern and length
-  cap before anything else happens.
-- Options are checked against an explicit allow-list of valid values.
-- Provider output is sanitized before being passed downstream.
-- Credentials are read from environment variables only, never hardcoded
-  or logged.
-- Every external call has an explicit timeout.
-- Client-configured endpoints must be HTTPS (plain HTTP only when
-  explicitly allowed for a private container network), redirects are not
-  followed, and identifiers are sent as parameters, never pasted into URLs.
-- Failures return an explicit `status="error"` result (fail closed) rather
-  than a fake success.
+## Security notes
 
-## Status
-
-Provider adapters, provider selection, response-to-schema mapping onto
-the main application's `DetectionResult`, rate limiting and the async
-path are implemented and tested. `schema.py` mirrors the main repo's
-schema and must be kept in sync with it
-(`tests/test_schema_contract.py` guards the shape).
+- Never commit `.env` or a providers file containing real endpoints you want kept private. `.env` is in `.gitignore` and `.dockerignore`.
+- Keys are only ever read from environment variables or a mounted secret file, and are never written to logs or responses.
+- Provider endpoints must use HTTPS unless HTTP has been explicitly allowed for private networks.
+- The container runs as a non-root user.
 
 ## Branching
 
-This repo follows Gitflow: `main` → `develop` → `feature/*` → release
-branch → `main`.
-See: https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow
+This repo follows Gitflow: `feature/*` and `fix/*` branches go into `develop`, then a release branch, then `main`.
